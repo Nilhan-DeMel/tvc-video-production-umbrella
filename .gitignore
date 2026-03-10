@@ -1,0 +1,41 @@
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.benchmarks/
+
+# Local secrets and mission logs
+vault_dump.json
+commander_mission_log.json
+
+# Runtime/generated state
+tvc_multi_agent_db/
+intelligence/
+intelligence_7min/
+assets/
+
+# Evidence: keep source docs and runner scripts, ignore generated bundles
+Evidence/**
+!Evidence/
+!Evidence/*.md
+!Evidence/*runner.py
+
+# Generated media and one-off outputs
+emperor_output*.mp4
+emperor_output*.mov
+emperor_output*.avi
+cinematic_neon_city.mp4
+harvester_test.mp4
+sota_v5_chinese_llms.mp4
+Womens_Health_Masterclass.mp4
+Womens_Health_SOTA_7Min.mp4
+master_narration.mp3
+womens_health_vo.mp3
+womens_health_vo.vtt
+test.mp3
+test.vtt
+test_flux_smoke.jpg
+
+# Archives and ad hoc logs
+*.zip
+*.log
