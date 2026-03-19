@@ -1,7 +1,7 @@
 import sys
 import os
 import re
-import json
+import time
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPlainTextEdit, QComboBox, 
                              QPushButton, QProgressBar, QTextBrowser, QGroupBox,
@@ -10,9 +10,11 @@ from PyQt6.QtCore import Qt, QProcess, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QFontDatabase, QIcon, QColor, QPalette
 
 import tvc_config
+from tvc_duration import resolve_duration_plan
+from tvc_launch_contract import get_dead_end_metadata, persist_launch_payload, prepare_narrate_launch, strip_mode_label
+from tvc_voice_registry import DEFAULT_VOICE_PRESET_ID
 # --- Configuration Paths ---
 INTEL_DIR = os.path.dirname(tvc_config.PATHS["secrets"]) # D:\AI\API
-API_VAULT_FILE = os.path.join(tvc_config.PATHS["root"], "vault_dump.json")
 APP_STATION_DIR = tvc_config.PATHS["root"]
 COMMANDER_SCRIPT = os.path.join(APP_STATION_DIR, "supreme_commander.py")
 
@@ -183,7 +185,11 @@ class TVCLauncher(QMainWindow):
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["MODE_NARRATE", "MODE_GENERATIVE", "MODE_VOICE"])
+        self.mode_combo.addItems([
+            "MODE_NARRATE [LEGACY COMPATIBILITY PATH]",
+            "MODE_GENERATIVE [DEAD-END / unsupported in Fireworks-only mode]",
+            "MODE_VOICE [LEGACY DEAD-END / use Modern Studio UI or CLI]",
+        ])
         mode_layout.addWidget(self.mode_combo)
         ord_layout.addLayout(mode_layout)
 
@@ -270,28 +276,30 @@ class TVCLauncher(QMainWindow):
         main_layout.addLayout(action_layout)
 
     def load_api_vault(self):
-        if not os.path.exists(API_VAULT_FILE):
-            self.api_combo.addItem("⚠️ Vault missing")
-            return
-            
-        try:
-            with open(API_VAULT_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            for item in data:
-                status = item.get("status", "unknown")
-                name = item.get("name", "Unknown")
-                provider = item.get("provider", "Unknown")
-                
-                # SOTA Iconography for dropdowns
-                if status == "active":
-                    display_text = f"🟢 {name} [{provider.upper()}]"
-                    self.api_combo.addItem(display_text, item)
-                else:
-                    display_text = f"🔒 {name} (Inactive)"
-                    self.api_combo.addItem(display_text, item)
-        except Exception as e:
-            self.api_combo.addItem(f"⚠️ Vault error: {e}")
+        self.api_combo.clear()
+        reasoning_key = str(os.getenv("FIREWORKS_API_KEY", "") or "").strip()
+        image_key = str(os.getenv("BLF_FLUX2PRO", "") or "").strip()
+
+        def _mask_key(raw_key: str) -> str:
+            if len(raw_key) >= 8:
+                return f"{raw_key[:4]}...{raw_key[-4:]}"
+            if len(raw_key) >= 2:
+                return f"{raw_key[:2]}..."
+            return "***"
+
+        if reasoning_key:
+            self.api_combo.addItem(f"🟢 Reasoning key detected (FIREWORKS_API_KEY: {_mask_key(reasoning_key)})")
+        else:
+            self.api_combo.addItem("⚠️ Reasoning key missing (FIREWORKS_API_KEY)")
+
+        if image_key:
+            self.api_combo.addItem(f"🟢 Image key detected (BLF_FLUX2PRO: {_mask_key(image_key)})")
+        else:
+            self.api_combo.addItem("⚠️ Image key missing (BLF_FLUX2PRO)")
+
+        self.api_combo.setToolTip(
+            'Set keys with: setx FIREWORKS_API_KEY "<reasoning_key>" and setx BLF_FLUX2PRO "<image_key>", then relaunch app.'
+        )
 
     def append_to_terminal(self, text, color="#e0e0e0"):
         # Very simple HTML formatting for terminal lines
@@ -331,15 +339,20 @@ class TVCLauncher(QMainWindow):
             QMessageBox.warning(self, "Invalid Request", "Mission Brief description cannot be empty.")
             return
 
-        # Prepare arguments
-        mode = self.mode_combo.currentText().split()[0]
-        duration = self.dur_combo.currentText().replace("s", "")
-        
-        full_request = f"--mode {mode} --duration {duration} {desc}"
+        mode = strip_mode_label(self.mode_combo.currentText())
+        if mode != "MODE_NARRATE":
+            meta = get_dead_end_metadata(mode) or get_dead_end_metadata("legacy_launcher")
+            message = str(meta.get("message", "Legacy launcher supports MODE_NARRATE compatibility runs only."))
+            self.append_to_terminal(message, "#ff4d4f")
+            QMessageBox.warning(self, "Legacy Compatibility Shell", message)
+            return
+
+        legacy_meta = get_dead_end_metadata("legacy_launcher")
 
         # Setup UI for active process
         self.terminal.clear()
-        self.append_to_terminal(f"💥 LAUNCH SEQUENCE INITIATED...", "#ffab00")
+        self.append_to_terminal("💥 LAUNCH SEQUENCE INITIATED...", "#ffab00")
+        self.append_to_terminal(str(legacy_meta.get("message", "")), "#888888")
         self.append_to_terminal(f"Target: {COMMANDER_SCRIPT}", "#888888")
         
         self.progress_bar.setValue(0)
@@ -348,25 +361,38 @@ class TVCLauncher(QMainWindow):
         self.abort_btn.setEnabled(True)
         self.description_input.setEnabled(False)
 
-        # Run via QProcess
+        duration_seconds = int(self.dur_combo.currentText().replace("s", ""))
+        duration_plan = resolve_duration_plan(
+            input_source="USER_CONTEXT",
+            context_rewrite="force",
+            narration_style="documentary",
+            context_text=desc,
+            requested_target_duration=duration_seconds,
+        )
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        prepared = prepare_narrate_launch(
+            script=desc,
+            stamp=stamp,
+            request_prompt="Create narrated video from provided script.",
+            duration_plan=duration_plan,
+            narration_style="documentary",
+            context_rewrite="force",
+            watermark_mode="on",
+            voice_preset=DEFAULT_VOICE_PRESET_ID,
+            key_probe="off",
+            python_executable=sys.executable,
+            commander_path=COMMANDER_SCRIPT,
+            app_root=APP_STATION_DIR,
+            expected_root_name="video_production_agent",
+            ui_profile="legacy_launcher:compatibility",
+            session_id="legacy-launcher",
+            launch_source="legacy_launcher_compat",
+            timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        persist_launch_payload(prepared.payload, stamp)
+
         self.process.setProgram(sys.executable)
-        self.process.setArguments([COMMANDER_SCRIPT])
-        
-        # We need supreme_commander.py to accept arguments, or we pass via --request
-        # For this prototype, if supreme_commander supports argparse we pass it.
-        # However, supreme_commander currently doesn't use argparse. It expects user input.
-        # Wait, the code in supreme_commander has `supreme_video_commander()`. 
-        # I need to create a tiny runner file to bridge this.
-        self.append_to_terminal("[INTERNAL] Executing runner shim...", "#888888")
-        
-        runner_script = os.path.join(APP_STATION_DIR, "tvc_ui_runner.py")
-        with open(runner_script, "w", encoding="utf-8") as f:
-            f.write(f"import sys\n")
-            f.write(f"from supreme_commander import supreme_video_commander\n")
-            f.write(f"supreme_video_commander(sys.argv[1])\n")
-            
-        self.process.setProgram(sys.executable)
-        self.process.setArguments(["-u", runner_script, full_request]) # -u unbuffered
+        self.process.setArguments(prepared.arguments)
         self.process.start()
 
     def abort_mission(self):

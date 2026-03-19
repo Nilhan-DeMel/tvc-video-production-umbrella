@@ -8,6 +8,12 @@ import types
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from tvc_key_audit import log_api_key_lookup
+except Exception:
+    def log_api_key_lookup(**kwargs):
+        return False
+
 
 PROJECT_DIR = Path(r"D:\AI-Apps-In-Drive\App_Station\Video_production")
 RUN_ROOT = PROJECT_DIR / "Evidence" / "node1_writer_guard_runs"
@@ -37,11 +43,31 @@ def load_core():
             data = read_json(vault, [])
             for entry in data:
                 if entry.get("name") == secret_name and entry.get("key"):
+                    log_api_key_lookup(
+                        secret_alias=secret_name,
+                        outcome="success_shim_name_match",
+                        source="evidence_shim",
+                        key_value=entry.get("key"),
+                        cache_hit=False,
+                    )
                     return entry["key"]
             if "key_HGmChvaB" in secret_name:
                 for entry in data:
                     if entry.get("provider") == "Fireworks AI" and entry.get("key"):
+                        log_api_key_lookup(
+                            secret_alias=secret_name,
+                            outcome="success_shim_provider_match",
+                            source="evidence_shim",
+                            key_value=entry.get("key"),
+                            cache_hit=False,
+                        )
                         return entry["key"]
+            log_api_key_lookup(
+                secret_alias=secret_name,
+                outcome="failure_shim_not_found",
+                source="evidence_shim",
+                cache_hit=False,
+            )
             raise RuntimeError(f"VAULT SHIM: no key found for {secret_name}")
 
         shim = types.ModuleType("tvc_vault")
