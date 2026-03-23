@@ -1886,7 +1886,7 @@ class TVCStudioAgentWindow(QMainWindow):
         self._set_narrate_stage("verified" if code == 0 else "failed", detail="Verification clean." if code == 0 else "Commander exited with a failure status.")
         self._append_log(f"Process finished with exit code {code}")
 
-        run_id = self.active_run_id if self.active_run_id and os.path.isdir(os.path.join(RUNS_ROOT, self.active_run_id)) else ""
+        run_id = str(self.active_run_id or "").strip()
         if not run_id:
             binding = self._resolve_active_run_binding()
             fallback_run_id = str(binding.get("run_id", "") or "").strip()
