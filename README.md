@@ -39,3 +39,15 @@ python .\tools\create_tvc_codex_workspace_shortcut.py
 ```
 
 That creates `TVC Codex Workspace.lnk` on the desktop and keeps the operator flow pointed at this umbrella repo instead of the older `Skills` workspace.
+
+To refresh all canonical TVC desktop shortcuts from the umbrella repo:
+
+```powershell
+python .\tools\refresh_tvc_desktop_shortcuts.py
+```
+
+That rewrites:
+
+- `TVC Codex Workspace.lnk`
+- `TVC Studio Agent.lnk`
+- `TVC Emperor.lnk`

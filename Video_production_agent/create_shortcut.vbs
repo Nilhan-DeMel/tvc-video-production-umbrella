@@ -1,9 +1,14 @@
 Set oWS = WScript.CreateObject("WScript.Shell")
-sLinkFile = "C:\Users\Nilhan.dev\Desktop\TVC Emperor.lnk"
+Set oFSO = CreateObject("Scripting.FileSystemObject")
+
+appDir = oFSO.GetParentFolderName(WScript.ScriptFullName)
+desktopDir = oWS.SpecialFolders("Desktop")
+sLinkFile = oFSO.BuildPath(desktopDir, "TVC Emperor.lnk")
+
 Set oLink = oWS.CreateShortcut(sLinkFile)
 oLink.TargetPath = "wscript.exe"
-oLink.Arguments = """D:\AI-Apps-In-Drive\App_Station\Video_production_agent\Launch_TVC_Empire.vbs"""
-oLink.WorkingDirectory = "D:\AI-Apps-In-Drive\App_Station\Video_production_agent"
+oLink.Arguments = """" & oFSO.BuildPath(appDir, "Launch_TVC_Empire.vbs") & """"
+oLink.WorkingDirectory = appDir
 oLink.Description = "Launch TVC Video Production"
-oLink.IconLocation = "D:\AI-Apps-In-Drive\App_Station\Video_production_agent\tvc_icon.ico"
+oLink.IconLocation = oFSO.BuildPath(appDir, "tvc_icon.ico")
 oLink.Save

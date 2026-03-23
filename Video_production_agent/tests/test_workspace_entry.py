@@ -15,3 +15,14 @@ def test_workspace_launcher_assets_exist_and_point_to_canonical_repo():
     assert "OpenAI.Codex_2p2nqsd0c76g0!App" in text
     assert 'Join-Path $RepoRoot "Video_production_agent"' in text
     assert "TVC Codex Workspace" in text
+
+
+def test_desktop_shortcut_refresher_exists_and_targets_all_canonical_tvc_entrypoints():
+    refresher = REPO_ROOT / "tools" / "refresh_tvc_desktop_shortcuts.py"
+    assert refresher.exists()
+
+    text = refresher.read_text(encoding="utf-8")
+    assert "TVC Studio Agent.lnk" in text
+    assert "TVC Emperor.lnk" in text
+    assert "TVC Codex Workspace.lnk" in text
+    assert "Video_production_agent" in text
