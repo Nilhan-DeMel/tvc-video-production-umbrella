@@ -29,3 +29,13 @@ That command:
 Day-to-day app work should happen in:
 
 `D:\AI-Apps-In-Drive\App_Station\tvc_umbrella_repo\Video_production_agent`
+
+## Workspace Launch
+
+To create a desktop entry that opens the canonical TVC folder and launches Codex:
+
+```powershell
+python .\tools\create_tvc_codex_workspace_shortcut.py
+```
+
+That creates `TVC Codex Workspace.lnk` on the desktop and keeps the operator flow pointed at this umbrella repo instead of the older `Skills` workspace.
