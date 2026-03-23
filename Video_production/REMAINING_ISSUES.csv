@@ -1,0 +1,9 @@
+ID,Severity,Category,Symptom,Repro Steps,Location
+ISSUE-001,HIGH,Devex,Absolute Path Proliferation,rg "D:\" .,Multiple Files
+ISSUE-002,BLOCKER,Reliability,Harvester Hang,python run_test.py "red cube" out.mp4,tvc_langgraph_core.py
+ISSUE-003,MEDIUM,Reliability,Pytest Collection Failure,pytest,Root
+ISSUE-004,MEDIUM,Correctness,Brittle Duration Gates,Inspect tvc_langgraph_core.py:482,tvc_langgraph_core.py
+ISSUE-005,LOW,Maintainability,Fragmented Config,rg "PROJECT_DIR =" .,Global
+ISSUE-006,LOW,UX,Telemetry Noise,Run any pipeline with VO,tvc_langgraph_core.py
+ISSUE-007,MEDIUM,Reliability,Telemetry Defect,Run whisper_verifier tests,tvc_langgraph_core.py
+ISSUE-008,HIGH,Reliability,Asynchronous Status Leak,Run supreme_commander.py in Voice mode,supreme_commander.py
