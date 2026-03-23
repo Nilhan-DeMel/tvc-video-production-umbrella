@@ -1,7 +1,14 @@
 import json
 import os
 
-from ui.services import attach_payload_to_run, mark_run_terminal, resolve_current_run_id, read_live_metrics, write_json
+from ui.services import (
+    attach_payload_to_run,
+    mark_run_terminal,
+    read_live_metrics,
+    resolve_active_run_binding,
+    resolve_current_run_id,
+    write_json,
+)
 from ui.state import UIState, load_ui_state, save_ui_state
 
 
@@ -141,6 +148,142 @@ def test_read_live_metrics_uses_current_observable_run(monkeypatch, tmp_path):
     assert metrics["node_detail"] == "Epoch 4/12 · generating"
     assert metrics["node_units_completed"] == 3
     assert metrics["node_units_total"] == 12
+
+
+def test_read_live_metrics_sums_provider_failure_counts_from_counts_dict(monkeypatch, tmp_path):
+    runs_root = tmp_path / "runs"
+    db_root = tmp_path / "db"
+    run_id = "20260321_101500"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("ui.services.RUNS_ROOT", str(runs_root))
+    monkeypatch.setattr("ui.services.DB_ROOT", str(db_root))
+
+    write_json(
+        str(db_root / "live_status.json"),
+        {
+            "run_id": run_id,
+            "current_node": "SotaForge",
+            "current_node_detail": "Epoch 2/5 · generating",
+            "progress_pct": 40.0,
+            "eta_human": "00:44",
+        },
+    )
+    write_json(
+        str(run_dir / "provider_resilience_report.json"),
+        {
+            "counts": {
+                "retryable": 1,
+                "precondition_412": 2,
+                "invalid_request_400": 0,
+                "circuit_open_failfast": 1,
+                "sanitized_retry": 0,
+                "permanent_failures": 3,
+                "successful_calls": 9,
+            }
+        },
+    )
+
+    metrics = read_live_metrics()
+    assert metrics["api_failures"] == 7
+
+
+def test_read_live_metrics_enriches_deterministic_scene_director_signal(monkeypatch, tmp_path):
+    runs_root = tmp_path / "runs"
+    db_root = tmp_path / "db"
+    run_id = "20260321_101700"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("ui.services.RUNS_ROOT", str(runs_root))
+    monkeypatch.setattr("ui.services.DB_ROOT", str(db_root))
+
+    write_json(
+        str(db_root / "live_status.json"),
+        {
+            "run_id": run_id,
+            "current_node": "SceneDirector",
+            "progress_pct": 20.0,
+        },
+    )
+    write_json(
+        str(run_dir / "scene_audio_prompt_report.json"),
+        {
+            "nodes": {
+                "SceneDirector": {
+                    "source": "deterministic_primary",
+                    "api_bypassed": True,
+                }
+            }
+        },
+    )
+
+    metrics = read_live_metrics()
+    assert metrics["node_signal_text"] == "API BYPASSED"
+    assert metrics["node_signal_tone"] == "info"
+    assert metrics["node_detail"] == "Deterministic primary · API bypassed"
+
+
+def test_resolve_active_run_binding_prefers_new_run_after_launch(monkeypatch, tmp_path):
+    runs_root = tmp_path / "runs"
+    db_root = tmp_path / "db"
+    for run_id in ["20260321_213328", "20260322_000219"]:
+        (runs_root / run_id).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("ui.services.RUNS_ROOT", str(runs_root))
+    monkeypatch.setattr("ui.services.DB_ROOT", str(db_root))
+
+    write_json(str(db_root / "latest_run_pointer.json"), {"run_id": "20260321_213328"})
+
+    binding = resolve_active_run_binding(
+        bound_run_id="",
+        launch_stamp="20260322_000218",
+        prelaunch_run_ids={"20260321_213328"},
+    )
+
+    assert binding["run_id"] == "20260322_000219"
+    assert binding["source"] == "fresh_after_launch"
+
+
+def test_read_live_metrics_prefers_explicit_bound_run_for_artifacts(monkeypatch, tmp_path):
+    runs_root = tmp_path / "runs"
+    db_root = tmp_path / "db"
+    stale_run_id = "20260321_213328"
+    active_run_id = "20260322_000219"
+    for run_id in [stale_run_id, active_run_id]:
+        (runs_root / run_id).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("ui.services.RUNS_ROOT", str(runs_root))
+    monkeypatch.setattr("ui.services.DB_ROOT", str(db_root))
+
+    write_json(
+        str(db_root / "live_status.json"),
+        {
+            "run_id": stale_run_id,
+            "current_node": "idle",
+            "progress_pct": 0.0,
+        },
+    )
+    write_json(
+        str(runs_root / active_run_id / "provider_resilience_report.json"),
+        {
+            "counts": {
+                "retryable": 1,
+                "precondition_412": 0,
+                "invalid_request_400": 0,
+                "circuit_open_failfast": 0,
+                "sanitized_retry": 0,
+                "permanent_failures": 0,
+            }
+        },
+    )
+
+    metrics = read_live_metrics(preferred_run_id=active_run_id)
+
+    assert metrics["run_id"] == active_run_id
+    assert metrics["api_failures"] == 1
+    assert metrics["run_binding_source"] == "bound"
 
 
 def test_mark_run_terminal_updates_active_pointer_and_root_live(monkeypatch, tmp_path):

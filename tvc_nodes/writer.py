@@ -278,9 +278,12 @@ def run_writer(node_input: WriterInput, services: WriterServices) -> WriterOutpu
             base_script = "\n".join(lines)
         pre_cpp_words = len(base_script.split())
 
-        processed_script = services.sanitize_tts_script(services.apply_cpp(base_script))
-        if not processed_script:
+        if disable_clamp and deterministic_user_context_mode:
             processed_script = base_script
+        else:
+            processed_script = services.sanitize_tts_script(services.apply_cpp(base_script))
+            if not processed_script:
+                processed_script = base_script
 
         post_cpp_words = len(processed_script.split())
         if disable_clamp:

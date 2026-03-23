@@ -1,4 +1,5 @@
 import os
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +183,145 @@ def test_launch_narrate_uses_shared_launch_contract(monkeypatch, tmp_path):
     assert captured["started"][1][0] == "D:/app/supreme_commander.py"
     assert captured["started"][1][-1] == "Create narrated video"
     assert win.active_payload_path == str(tmp_path / "payload.json")
+    assert win.command_state_title.text() == "Launch in progress"
+    win.close()
+
+
+def test_refresh_live_metrics_attaches_and_pins_active_run(monkeypatch):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    monkeypatch.setattr("ui.main_window.list_run_cards", lambda limit=60: [])
+    monkeypatch.setattr("ui.main_window.list_run_ids", lambda: ["20260322_000219", "20260321_213328"])
+    monkeypatch.setattr("ui.main_window.list_completed_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr("ui.main_window.load_ui_state", lambda: UIState())
+    monkeypatch.setattr(
+        "ui.main_window.resolve_active_run_binding",
+        lambda **kwargs: {"run_id": "20260322_000219", "source": "fresh_after_launch"},
+    )
+    monkeypatch.setattr(
+        "ui.main_window.read_live_metrics",
+        lambda preferred_run_id="": {
+            "run_id": preferred_run_id or "20260322_000219",
+            "node": "Audio",
+            "retries": 0,
+            "eta": "00:08",
+            "api_failures": 0,
+            "output_video": "",
+            "progress_pct": 14.0,
+            "node_detail": "Run attached · waiting for live node telemetry.",
+            "node_units_completed": None,
+            "node_units_total": None,
+            "run_binding_source": "bound",
+        },
+    )
+
+    app = QApplication.instance() or QApplication([])
+    win = TVCStudioAgentWindow()
+    monkeypatch.setattr(
+        win.process,
+        "state",
+        lambda: win.process.ProcessState.Running,
+    )
+    win.active_known_runs = {"20260321_213328"}
+    win.active_launch_stamp = "20260322_000218"
+    win._refresh_live_metrics()
+
+    assert win.active_run_id == "20260322_000219"
+    assert win.quick_runs_combo.currentText() == "20260322_000219"
+    assert win.tile_run.val.text() == "20260322_000219"
+    assert win.command_state_title.text() == "Run active"
+    win.close()
+
+
+def test_on_finished_attaches_payload_to_bound_run_before_fallback(monkeypatch, tmp_path):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    monkeypatch.setattr("ui.main_window.list_run_cards", lambda limit=60: [])
+    monkeypatch.setattr("ui.main_window.list_run_ids", lambda: ["20260321_213328"])
+    monkeypatch.setattr("ui.main_window.list_completed_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr("ui.main_window.load_ui_state", lambda: UIState())
+    monkeypatch.setattr(
+        "ui.main_window.read_live_metrics",
+        lambda preferred_run_id="": {
+            "run_id": preferred_run_id or "20260322_000219",
+            "node": "Verifier",
+            "retries": 0,
+            "eta": "--",
+            "api_failures": 0,
+            "output_video": "",
+            "progress_pct": 100.0,
+            "node_detail": "Verification clean.",
+            "node_units_completed": None,
+            "node_units_total": None,
+            "run_binding_source": "bound",
+        },
+    )
+
+    attached = {}
+    app = QApplication.instance() or QApplication([])
+    win = TVCStudioAgentWindow()
+    monkeypatch.setattr("ui.main_window.attach_payload_to_run", lambda payload_path, run_id, process_exit_code, ui_state: attached.setdefault("run_id", run_id))
+    monkeypatch.setattr(win.live_timer, "stop", lambda: None)
+    monkeypatch.setattr(win, "_refresh_run_gallery", lambda: None)
+    monkeypatch.setattr(win, "_refresh_post_runs", lambda: None)
+    monkeypatch.setattr(win, "_show_toast", lambda *args, **kwargs: None)
+
+    win.active_payload_path = str(tmp_path / "payload.json")
+    win.active_run_id = "20260322_000219"
+    win._on_finished(0, None)
+
+    assert attached["run_id"] == "20260322_000219"
+    win.close()
+
+
+def test_launch_seed_prefills_narrate_surface(monkeypatch, tmp_path):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    monkeypatch.setattr("ui.main_window.list_run_cards", lambda limit=60: [])
+    monkeypatch.setattr("ui.main_window.list_run_ids", lambda: [])
+    monkeypatch.setattr("ui.main_window.list_completed_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr("ui.main_window.load_ui_state", lambda: UIState())
+    monkeypatch.setattr(
+        "ui.main_window.read_live_metrics",
+        lambda: {
+            "run_id": "--",
+            "node": "idle",
+            "retries": 0,
+            "eta": "--",
+            "api_failures": 0,
+            "output_video": "",
+            "progress_pct": 0.0,
+            "node_detail": "",
+            "node_units_completed": None,
+            "node_units_total": None,
+        },
+    )
+
+    seed_path = tmp_path / "launch-seed.json"
+    seed_path.write_text(
+        json.dumps(
+            {
+                "request_title": "Seeded mission title",
+                "script_text": "Seeded exact script for deterministic narration.",
+                "narration_style": "sales_saas",
+                "context_rewrite": "off",
+                "watermark_mode": "on",
+                "key_probe": "off",
+                "voice_preset": DEFAULT_VOICE_PRESET_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TVC_STUDIO_LAUNCH_SEED_FILE", str(seed_path))
+
+    app = QApplication.instance() or QApplication([])
+    win = TVCStudioAgentWindow()
+
+    assert win.request_title.text() == "Seeded mission title"
+    assert win.script_text.toPlainText() == "Seeded exact script for deterministic narration."
+    assert win.style_combo.currentText() == "sales_saas"
+    assert win.rewrite_combo.currentText() == "off"
+    assert win.watermark_combo.currentText() == "on"
+    assert win.key_probe_combo.currentText() == "off"
+    assert win.voice_combo.currentData() == DEFAULT_VOICE_PRESET_ID
+    assert win.command_state_title.text() == "Launch armed"
     win.close()
 
 
@@ -247,6 +387,41 @@ def test_refresh_live_metrics_populates_progress_and_detail(monkeypatch):
 
     assert win.tile_progress.val.text() == "78.1%"
     assert win.lbl_node_detail.text() == "Epoch 8/12 · generating"
+    win.close()
+
+
+def test_refresh_live_metrics_promotes_stage_signal_and_richer_sotaforge_detail(monkeypatch):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    monkeypatch.setattr("ui.main_window.list_run_cards", lambda limit=60: [])
+    monkeypatch.setattr("ui.main_window.list_run_ids", lambda: [])
+    monkeypatch.setattr("ui.main_window.list_completed_runs", lambda *args, **kwargs: [])
+    monkeypatch.setattr("ui.main_window.load_ui_state", lambda: UIState())
+    monkeypatch.setattr(
+        "ui.main_window.read_live_metrics",
+        lambda: {
+            "run_id": "20260321_102200",
+            "node": "SotaForge",
+            "retries": 0,
+            "eta": "00:43",
+            "api_failures": 1,
+            "output_video": "",
+            "progress_pct": 78.1,
+            "node_detail": "Epoch 8/12 · generating images · ETA 00:43",
+            "node_units_completed": 7,
+            "node_units_total": 12,
+            "node_signal_text": "LIVE COMPUTE",
+            "node_signal_tone": "live",
+        },
+    )
+
+    app = QApplication.instance() or QApplication([])
+    win = TVCStudioAgentWindow()
+    win._refresh_live_metrics()
+
+    assert win.command_confidence_pill.text() == "LIVE COMPUTE"
+    assert "Epoch 8/12" in win.command_state_body.text()
+    assert "00:43" in win.command_state_body.text()
+    assert win.lbl_node_detail.text() == "Epoch 8/12 · generating images · ETA 00:43"
     win.close()
 
 

@@ -123,6 +123,7 @@ class AudioEngineerServices:
     write_binary_artifact: Callable[..., Any]
     json_repair: Callable[[str], Any]
     get_hash: Callable[[str], str]
+    pronunciation_resolver: Callable[[str, str, str], dict]
     narration_style_default: str = "sales_saas"
     voice_preset_default: str = "style_default"
 

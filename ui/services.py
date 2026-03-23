@@ -3,8 +3,9 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 from .paths import DB_ROOT, EVIDENCE_ROOT, RUNS_ROOT, UI_PAYLOAD_ROOT
 from tvc_launch_contract import LaunchPayloadV2, persist_launch_payload, write_context_file
@@ -20,6 +21,17 @@ def _latest_run_pointer_path() -> str:
 
 def _root_live_status_path() -> str:
     return os.path.join(DB_ROOT, "live_status.json")
+
+
+def _run_exists(run_id: str) -> bool:
+    run_id = str(run_id or "").strip()
+    return bool(run_id) and os.path.isdir(os.path.join(RUNS_ROOT, run_id))
+
+
+def _normalize_run_ids(run_ids: Iterable[str] | None) -> set[str]:
+    if not run_ids:
+        return set()
+    return {str(run_id or "").strip() for run_id in run_ids if str(run_id or "").strip()}
 
 
 def ensure_dir(path: str):
@@ -40,6 +52,126 @@ def write_json(path: str, payload):
     ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=True)
+
+
+def _coerce_int(value) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _provider_failure_total(resilience: Dict) -> int:
+    counts = resilience.get("counts", {}) if isinstance(resilience, dict) else {}
+    if isinstance(counts, dict) and counts:
+        return sum(
+            _coerce_int(counts.get(key))
+            for key in (
+                "retryable",
+                "precondition_412",
+                "invalid_request_400",
+                "circuit_open_failfast",
+                "sanitized_retry",
+                "permanent_failures",
+            )
+        )
+    return _coerce_int((resilience or {}).get("failure_count", (resilience or {}).get("failures", 0)))
+
+
+def _humanize_signal(source: str, api_bypassed: bool) -> tuple[str, str]:
+    src = str(source or "").strip().lower()
+    if api_bypassed:
+        return "API BYPASSED", "info"
+    if src == "cache_resume":
+        return "CACHE RESUME", "info"
+    if src == "repair_retry":
+        return "REPAIR RETRY", "warning"
+    if src in {"deterministic_primary", "deterministic_user_context_fallback", "local_deterministic_primary", "local_cpp_primary"}:
+        return "DETERMINISTIC LOCAL", "info"
+    return "LIVE COMPUTE", "live"
+
+
+def _enrich_sotaforge_detail(detail: str, eta: str, completed, total) -> str:
+    enriched = str(detail or "").strip()
+    if enriched:
+        if re.search(r"\bgenerating\b", enriched, flags=re.IGNORECASE) and "image" not in enriched.lower():
+            enriched = re.sub(r"\bgenerating\b", "generating images", enriched, count=1, flags=re.IGNORECASE)
+    elif total:
+        current = max(1, min(_coerce_int(total), _coerce_int(completed) + (0 if _coerce_int(completed) >= _coerce_int(total) else 1)))
+        enriched = f"Epoch {current}/{_coerce_int(total)} · generating images"
+    if eta and eta != "--" and f"ETA {eta}" not in enriched:
+        enriched = f"{enriched} · ETA {eta}" if enriched else f"ETA {eta}"
+    return enriched
+
+
+def _node_observability(run_dir: str, node_name: str, detail: str, eta: str, completed, total) -> Dict[str, str]:
+    node = str(node_name or "").strip()
+    observed = {
+        "node_detail": str(detail or "").strip(),
+        "node_signal_text": "",
+        "node_signal_tone": "",
+    }
+    if not run_dir or not os.path.isdir(run_dir):
+        return observed
+
+    scene_audio = read_json(os.path.join(run_dir, "scene_audio_prompt_report.json"), {})
+    scene_nodes = scene_audio.get("nodes", {}) if isinstance(scene_audio, dict) else {}
+
+    if node == "Writer":
+        writer_report = read_json(os.path.join(run_dir, "writer_quality_report.json"), {})
+        if writer_report.get("deterministic_user_context_path"):
+            observed["node_detail"] = "Deterministic primary · exact USER_CONTEXT script preserved"
+            observed["node_signal_text"], observed["node_signal_tone"] = "DETERMINISTIC PRIMARY", "info"
+        elif writer_report.get("cache_resume_used"):
+            observed["node_detail"] = "Cache resume · writer output reused"
+            observed["node_signal_text"], observed["node_signal_tone"] = "CACHE RESUME", "info"
+        return observed
+
+    if node == "TopicExtractor":
+        topic_report = read_json(os.path.join(run_dir, "topic_callout_quality_report.json"), {})
+        source = str(topic_report.get("source", "") or "").strip()
+        api_bypassed = bool(topic_report.get("api_bypassed", False))
+        if source or api_bypassed:
+            observed["node_detail"] = "Deterministic primary · API bypassed" if api_bypassed else source.replace("_", " ")
+            observed["node_signal_text"], observed["node_signal_tone"] = _humanize_signal(source, api_bypassed)
+        return observed
+
+    if node in scene_nodes:
+        node_report = scene_nodes.get(node, {}) if isinstance(scene_nodes, dict) else {}
+        source = str(node_report.get("source", "") or node_report.get("mapping_source", "") or "").strip()
+        api_bypassed = bool(node_report.get("api_bypassed", False))
+        if node == "SotaForge":
+            observed["node_detail"] = _enrich_sotaforge_detail(observed["node_detail"], eta, completed, total)
+            observed["node_signal_text"], observed["node_signal_tone"] = "LIVE COMPUTE", "live"
+            return observed
+        if node == "PromptArchitect" and source == "deterministic_user_context_fallback":
+            observed["node_detail"] = "Deterministic local prompt composition active"
+        elif api_bypassed:
+            observed["node_detail"] = "Deterministic primary · API bypassed"
+        elif source:
+            observed["node_detail"] = source.replace("_", " ")
+        if source or api_bypassed:
+            observed["node_signal_text"], observed["node_signal_tone"] = _humanize_signal(source, api_bypassed)
+        return observed
+
+    if node == "Audio":
+        audio_report = read_json(os.path.join(run_dir, "audio_stage_report.json"), {})
+        if audio_report:
+            source = str(audio_report.get("mapping_source", "") or "").strip()
+            api_bypassed = bool(audio_report.get("api_bypassed", False))
+            observed["node_detail"] = (
+                "Deterministic local audio path · API bypassed"
+                if api_bypassed
+                else source.replace("_", " ")
+            )
+            observed["node_signal_text"], observed["node_signal_tone"] = _humanize_signal(source, api_bypassed)
+        return observed
+
+    if node == "SotaForge":
+        observed["node_detail"] = _enrich_sotaforge_detail(observed["node_detail"], eta, completed, total)
+        observed["node_signal_text"], observed["node_signal_tone"] = "LIVE COMPUTE", "live"
+
+    return observed
 
 
 def resolve_latest_run_id() -> str:
@@ -68,6 +200,48 @@ def resolve_current_run_id() -> str:
 
     run_ids = list_run_ids()
     return run_ids[0] if run_ids else ""
+
+
+def resolve_active_run_binding(
+    bound_run_id: str = "",
+    launch_stamp: str = "",
+    prelaunch_run_ids: Iterable[str] | None = None,
+) -> Dict[str, str]:
+    bound_run_id = str(bound_run_id or "").strip()
+    if _run_exists(bound_run_id):
+        return {"run_id": bound_run_id, "source": "bound"}
+
+    live = read_json(_root_live_status_path(), {})
+    run_id = str(live.get("run_id", "") or "").strip()
+    if _run_exists(run_id):
+        return {"run_id": run_id, "source": "root_live"}
+
+    active = read_json(_active_run_pointer_path(), {})
+    run_id = str(active.get("run_id", "") or "").strip()
+    if _run_exists(run_id):
+        return {"run_id": run_id, "source": "active_pointer"}
+
+    known_runs = _normalize_run_ids(prelaunch_run_ids)
+    run_ids = list_run_ids()
+    if launch_stamp:
+        fresh_candidates = [
+            run_id
+            for run_id in run_ids
+            if run_id not in known_runs and run_id >= str(launch_stamp).strip()
+        ]
+    else:
+        fresh_candidates = [run_id for run_id in run_ids if run_id not in known_runs]
+    if fresh_candidates:
+        return {"run_id": fresh_candidates[0], "source": "fresh_after_launch"}
+
+    run_id = resolve_latest_run_id()
+    if _run_exists(run_id):
+        return {"run_id": run_id, "source": "latest_pointer"}
+
+    if run_ids:
+        return {"run_id": run_ids[0], "source": "run_list"}
+
+    return {"run_id": "", "source": "none"}
 
 
 def list_run_ids() -> List[str]:
@@ -111,7 +285,7 @@ def list_run_cards(limit: int = 24) -> List[Dict]:
                 "duration": verifier.get("video_duration"),
                 "verified": verifier.get("verified"),
                 "telemetry_pass": verifier.get("telemetry_pass"),
-                "api_failures": resilience.get("failure_count", resilience.get("failures", 0)),
+                "api_failures": _provider_failure_total(resilience),
                 "fallback_count": resilience.get("fallback_count", 0),
                 "thumbnail": run_thumbnail(run_dir),
             }
@@ -186,27 +360,44 @@ def mark_run_terminal(run_id: str, status: str, error: str = ""):
         write_json(_root_live_status_path(), live)
 
 
-def read_live_metrics() -> Dict:
+def read_live_metrics(preferred_run_id: str = "") -> Dict:
     live = read_json(_root_live_status_path(), {})
-    run_id = str(live.get("run_id", "") or resolve_current_run_id() or "--")
+    binding = resolve_active_run_binding(bound_run_id=preferred_run_id)
+    run_id = str(binding.get("run_id", "") or live.get("run_id", "") or resolve_current_run_id() or "--")
+    eta = str(live.get("eta", "") or live.get("eta_human", "") or "--")
+    detail = str(live.get("current_node_detail", "") or "")
+    node_name = str(live.get("node", "") or live.get("current_node", "") or live.get("stage", "") or "idle")
     metrics = {
         "run_id": run_id,
-        "node": str(live.get("node", "") or live.get("current_node", "") or live.get("stage", "") or "idle"),
+        "node": node_name,
         "retries": int(live.get("retries", 0) or live.get("retries_total", 0) or 0),
-        "eta": str(live.get("eta", "") or live.get("eta_human", "") or "--"),
+        "eta": eta,
         "api_failures": 0,
         "output_video": "",
         "progress_pct": float(live.get("progress_pct", 0.0) or 0.0),
-        "node_detail": str(live.get("current_node_detail", "") or ""),
+        "node_detail": detail,
         "node_units_completed": live.get("current_node_units_completed"),
         "node_units_total": live.get("current_node_units_total"),
         "actual_audio_duration_seconds": live.get("actual_audio_duration_seconds"),
         "seed_is_initial_snapshot": bool(live.get("seed_is_initial_snapshot", False)),
+        "node_signal_text": "",
+        "node_signal_tone": "",
+        "run_binding_source": str(binding.get("source", "") or ""),
     }
     if run_id and run_id != "--":
         run_dir = os.path.join(RUNS_ROOT, run_id)
         resilience = read_json(os.path.join(run_dir, "provider_resilience_report.json"), {})
-        metrics["api_failures"] = int(resilience.get("failure_count", resilience.get("failures", 0)) or 0)
+        metrics["api_failures"] = _provider_failure_total(resilience)
+        metrics.update(
+            _node_observability(
+                run_dir,
+                node_name,
+                detail,
+                eta,
+                metrics.get("node_units_completed"),
+                metrics.get("node_units_total"),
+            )
+        )
         final_video = str(live.get("final_video", "") or "")
         if final_video and os.path.exists(final_video):
             metrics["output_video"] = final_video

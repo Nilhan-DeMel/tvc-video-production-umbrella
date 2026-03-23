@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -63,6 +64,7 @@ from .services import (
     list_run_ids,
     mark_run_terminal,
     read_live_metrics,
+    resolve_active_run_binding,
     resolve_current_run_id,
     resolve_latest_run_id,
 )
@@ -190,12 +192,16 @@ class TVCStudioAgentWindow(QMainWindow):
         self.process = None
         self.active_payload_path = ""
         self.active_known_runs: set = set()
+        self.active_run_id = ""
+        self.active_run_source = ""
+        self.active_launch_stamp = ""
         self.toast_widgets: List[Toast] = []
 
         self._init_window()
         self._init_process()
         self._build_shell()
         self._apply_ui_state()
+        self._apply_launch_seed()
         self._bind_shortcuts()
         self._refresh_live_metrics()
         self._refresh_run_gallery()
@@ -1544,6 +1550,23 @@ class TVCStudioAgentWindow(QMainWindow):
         stage = str(stage or "idle").strip().lower()
         self.narrate_stage_mode = stage
         progress_text = "--" if progress_pct is None else f"{float(progress_pct):.1f}%"
+        if stage == "launching":
+            self.command_state_label.setText("COMMANDER HANDSHAKE")
+            self.command_state_title.setText("Launch in progress")
+            self.command_state_body.setText(detail or "Commander started. Waiting for the new run to attach to the live deck.")
+            self.command_confidence_pill.setText("WAITING FOR RUN ATTACHMENT")
+            self.command_confidence_pill.set_tone("info")
+            self.preview_player.set_state("HANDSHAKE", "info", detail or "Waiting for live run telemetry to bind.")
+            self.deck_launch_tile.set_value("LAUNCHING")
+            self.deck_launch_tile.set_tone("info")
+            self.deck_progress_tile.set_value("0.0%")
+            self.deck_progress_tile.set_tone("info")
+            self.deck_output_tile.set_value("PENDING")
+            self.deck_output_tile.set_tone("default")
+            self.btn_open_latest_video.set_accent_kind("ghost")
+            self._set_narrate_utility_mode("feed")
+            self._sync_narrate_responsive_layout()
+            return
         if stage == "running":
             self.command_state_label.setText("LIVE EXECUTION")
             self.command_state_title.setText("Run active")
@@ -1812,6 +1835,9 @@ class TVCStudioAgentWindow(QMainWindow):
         )
         self.active_payload_path = persist_launch_payload(prepared.payload, stamp)
         self.active_known_runs = set(list_run_ids())
+        self.active_launch_stamp = stamp
+        self.active_run_id = ""
+        self.active_run_source = ""
 
         self.process.setWorkingDirectory(APP_ROOT)
         self.process.start(sys.executable, prepared.arguments)
@@ -1820,15 +1846,15 @@ class TVCStudioAgentWindow(QMainWindow):
             return
         self.btn_launch.setEnabled(False)
         self.btn_abort.setEnabled(True)
-        self._set_process_pill("Running", "info")
-        self._set_narrate_stage("running", detail="Commander launch handshake in progress.", progress_pct=0.0)
+        self._set_process_pill("Launching", "info")
+        self._set_narrate_stage("launching", detail="Commander started · waiting for run attachment", progress_pct=0.0)
         self.live_timer.start()
         self._append_log("NARRATE launch started with ui_launch_payload.v2")
         self._show_toast("NARRATE started", "success")
 
     def _abort_run(self):
         if self.process.state() != self.process.ProcessState.NotRunning:
-            run_id = resolve_current_run_id()
+            run_id = self.active_run_id or resolve_current_run_id()
             self.process.kill()
             self.process.waitForFinished(3000)
             if run_id:
@@ -1860,10 +1886,21 @@ class TVCStudioAgentWindow(QMainWindow):
         self._set_narrate_stage("verified" if code == 0 else "failed", detail="Verification clean." if code == 0 else "Commander exited with a failure status.")
         self._append_log(f"Process finished with exit code {code}")
 
-        all_runs = set(list_run_ids())
-        new_runs = sorted([r for r in all_runs if r not in self.active_known_runs])
-        run_id = new_runs[-1] if new_runs else (resolve_current_run_id() or resolve_latest_run_id())
+        run_id = self.active_run_id if self.active_run_id and os.path.isdir(os.path.join(RUNS_ROOT, self.active_run_id)) else ""
+        if not run_id:
+            binding = self._resolve_active_run_binding()
+            fallback_run_id = str(binding.get("run_id", "") or "").strip()
+            if fallback_run_id and os.path.isdir(os.path.join(RUNS_ROOT, fallback_run_id)):
+                run_id = fallback_run_id
+                self._append_log(f"Run attachment fallback used: {run_id} ({binding.get('source', 'unknown_source')})")
+        if not run_id:
+            all_runs = set(list_run_ids())
+            new_runs = sorted([r for r in all_runs if r not in self.active_known_runs])
+            run_id = new_runs[-1] if new_runs else (resolve_current_run_id() or resolve_latest_run_id())
+            if run_id:
+                self._append_log(f"Run attachment fallback used: {run_id} (post-finish run discovery)")
         if run_id:
+            self.active_run_id = run_id
             attach_payload_to_run(
                 self.active_payload_path,
                 run_id,
@@ -1883,9 +1920,52 @@ class TVCStudioAgentWindow(QMainWindow):
         self.log_console.append(text)
         self.log_console.verticalScrollBar().setValue(self.log_console.verticalScrollBar().maximum())
 
+    def _process_is_running(self) -> bool:
+        return self.process.state() != self.process.ProcessState.NotRunning
+
+    def _resolve_active_run_binding(self) -> Dict[str, str]:
+        return resolve_active_run_binding(
+            bound_run_id=self.active_run_id,
+            launch_stamp=self.active_launch_stamp,
+            prelaunch_run_ids=self.active_known_runs,
+        )
+
+    def _capture_active_run_binding(self) -> str:
+        binding = self._resolve_active_run_binding()
+        run_id = str(binding.get("run_id", "") or "").strip()
+        source = str(binding.get("source", "") or "").strip()
+        if run_id and run_id != self.active_run_id:
+            self.active_run_id = run_id
+            self.active_run_source = source
+            self._append_log(f"Run attached: {run_id} ({source or 'unknown_source'})")
+        elif run_id and source:
+            self.active_run_source = source
+        return run_id
+
+    def _read_live_metrics(self) -> Dict:
+        try:
+            return read_live_metrics(preferred_run_id=self.active_run_id)
+        except TypeError:
+            return read_live_metrics()
+
+    def _refresh_quick_runs_combo(self, preferred_run_id: str = ""):
+        previous_selection = self.quick_runs_combo.currentText()
+        run_ids = list_run_ids()[:50]
+        self.quick_runs_combo.blockSignals(True)
+        self.quick_runs_combo.clear()
+        self.quick_runs_combo.addItems(run_ids)
+        target = str(preferred_run_id or "").strip()
+        if target and target in run_ids:
+            self.quick_runs_combo.setCurrentText(target)
+        elif previous_selection and previous_selection in run_ids:
+            self.quick_runs_combo.setCurrentText(previous_selection)
+        self.quick_runs_combo.blockSignals(False)
+
     # ---------- Live / Inspector ----------
     def _refresh_live_metrics(self):
-        m = read_live_metrics()
+        if self._process_is_running() or self.active_run_id:
+            self._capture_active_run_binding()
+        m = self._read_live_metrics()
         self.tile_node.set_value(m.get("node", "idle"))
         self.tile_retry.set_value(str(m.get("retries", 0)))
         self.tile_fail.set_value(str(m.get("api_failures", 0)))
@@ -1914,10 +1994,7 @@ class TVCStudioAgentWindow(QMainWindow):
         self.tile_retry.set_tone("warning" if retries else "default")
         self.deck_progress_tile.set_value(f"{progress_pct:.1f}%")
         self.deck_progress_tile.set_tone("success" if progress_pct >= 100.0 else "live" if progress_pct > 0.0 else "default")
-        self.quick_runs_combo.blockSignals(True)
-        self.quick_runs_combo.clear()
-        self.quick_runs_combo.addItems(list_run_ids()[:50])
-        self.quick_runs_combo.blockSignals(False)
+        self._refresh_quick_runs_combo(self.active_run_id if self._process_is_running() else "")
 
         guard_ok = self._agent_root_guard()
         self.root_status.setText("ROOT PASS" if guard_ok else "ROOT FAIL")
@@ -1929,16 +2006,40 @@ class TVCStudioAgentWindow(QMainWindow):
             self.preview_player.set_video(out)
             self.deck_output_tile.set_value("OUTPUT READY")
             self.preview_player.set_state("OUTPUT READY", "success", "Latest render is attached and ready for review.")
-        if node_name.lower() not in {"idle", "--"}:
+        if self._process_is_running() and not self.active_run_id:
+            self._set_process_pill("Launching", "info")
+            self.command_ready_pill.setText("LAUNCHING")
+            self.command_ready_pill.set_tone("info")
+            self._set_narrate_stage("launching", detail="Commander started · waiting for run attachment", progress_pct=0.0)
+        elif self._process_is_running() and self.active_run_id:
+            self._set_process_pill("Running", "info")
+            self.command_ready_pill.setText(node_name.upper() if node_name.lower() not in {"idle", "--"} else "RUNNING")
+            self.command_ready_pill.set_tone("live")
+            run_detail = detail or "Run attached · waiting for live node telemetry."
+            self._set_narrate_stage("running", detail=run_detail, progress_pct=progress_pct)
+            signal_text = str(m.get("node_signal_text", "") or "").strip()
+            signal_tone = str(m.get("node_signal_tone", "") or "").strip()
+            if signal_text:
+                self.command_confidence_pill.setText(signal_text)
+                self.command_confidence_pill.set_tone(signal_tone or "info")
+        elif node_name.lower() not in {"idle", "--"}:
             self.command_ready_pill.setText(node_name.upper())
             self.command_ready_pill.set_tone("live")
             self._set_narrate_stage("running", detail=detail or node_name, progress_pct=progress_pct)
+            signal_text = str(m.get("node_signal_text", "") or "").strip()
+            signal_tone = str(m.get("node_signal_tone", "") or "").strip()
+            if signal_text:
+                self.command_confidence_pill.setText(signal_text)
+                self.command_confidence_pill.set_tone(signal_tone or "info")
         elif progress_pct >= 100.0 and out:
             self._set_narrate_stage("verified", detail="Verification clean. Latest output is attached.")
 
     def _quick_run_selected(self, run_id: str):
         run_id = str(run_id or "").strip()
         if not run_id:
+            return
+        if self._process_is_running() and self.active_run_id:
+            self._refresh_quick_runs_combo(self.active_run_id)
             return
         if run_id not in self.ui_state.recent_runs:
             self.ui_state.recent_runs.insert(0, run_id)
@@ -2226,19 +2327,19 @@ class TVCStudioAgentWindow(QMainWindow):
             self._show_toast("Video path missing", "warning")
 
     def _open_latest_run_folder(self):
-        run_id = resolve_current_run_id() or resolve_latest_run_id()
+        run_id = self.active_run_id or resolve_current_run_id() or resolve_latest_run_id()
         if not run_id:
             return
         self._open_path(os.path.join(RUNS_ROOT, run_id))
 
     def _open_latest_video(self):
-        m = read_live_metrics()
+        m = self._read_live_metrics()
         out = str(m.get("output_video", "") or "")
         if out and os.path.exists(out):
             self._open_video_path(out)
             self.preview_player.set_video(out)
             return
-        run_id = resolve_current_run_id() or resolve_latest_run_id()
+        run_id = self.active_run_id or resolve_current_run_id() or resolve_latest_run_id()
         if not run_id:
             return
         run_dir = os.path.join(RUNS_ROOT, run_id)
@@ -2331,6 +2432,47 @@ class TVCStudioAgentWindow(QMainWindow):
             self.inspector_density_combo.setCurrentText(self.ui_state.inspector_density)
         self._change_inspector_density(self.ui_state.inspector_density)
         self._stabilize_narrate_layout()
+
+    def _apply_launch_seed(self):
+        seed_path = str(os.environ.get("TVC_STUDIO_LAUNCH_SEED_FILE", "") or "").strip()
+        if not seed_path or not os.path.exists(seed_path):
+            return
+        try:
+            with open(seed_path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+
+        request_title = str(raw.get("request_title", "") or "").strip()
+        if request_title:
+            self.request_title.setText(request_title)
+
+        script_text = raw.get("script_text")
+        if script_text is None:
+            script_text = raw.get("context_text")
+        if script_text is not None:
+            self.script_text.setPlainText(str(script_text))
+
+        for value, combo in (
+            (raw.get("narration_style"), self.style_combo),
+            (raw.get("context_rewrite"), self.rewrite_combo),
+            (raw.get("watermark_mode"), self.watermark_combo),
+            (raw.get("key_probe"), self.key_probe_combo),
+        ):
+            choice = str(value or "").strip()
+            if choice:
+                combo.setCurrentText(choice)
+
+        voice_id = str(raw.get("voice_preset", "") or "").strip()
+        if voice_id:
+            for index in range(self.voice_combo.count()):
+                if str(self.voice_combo.itemData(index) or "") == voice_id:
+                    self.voice_combo.setCurrentIndex(index)
+                    break
+
+        self._rebuild_preview()
 
     def closeEvent(self, event):
         self.ui_state.theme_id = self.theme_combo.currentText().strip() or self.ui_state.theme_id

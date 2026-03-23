@@ -161,6 +161,42 @@ def test_writer_module_bypasses_llm_in_deterministic_user_context_mode(tmp_path)
     assert manifest_box["writer_prompt_hash"].startswith("hash::")
 
 
+def test_writer_module_preserves_authored_punctuation_in_deterministic_user_context_mode(tmp_path):
+    apply_cpp_calls = []
+
+    services, captured_json, captured_text, _ = _capturing_services(
+        tmp_path,
+        smart_retry=lambda *args, **kwargs: pytest.fail("smart_retry should not run"),
+    )
+    services = services.__class__(
+        **{
+            **services.__dict__,
+            "apply_cpp": lambda text: apply_cpp_calls.append(str(text)) or str(text).replace(", rhythm", " rhythm"),
+        }
+    )
+    node_input = _sample_input(
+        context_summary=(
+            "I create AI-powered videos with polish, rhythm, and visual clarity. "
+            "Show your people, your service, your spaces, and your momentum. "
+            "Show a brand that feels trusted, active, and impossible to ignore. "
+            "Bring your message to life with premium social media and LinkedIn videos."
+        ),
+    )
+
+    result = run_writer(node_input, services)
+
+    assert result.status == "drafted"
+    assert (
+        result.script
+        == "I create AI-powered videos with polish, rhythm, and visual clarity. Show your people, your service, your spaces, and your momentum. Show a brand that feels trusted, active, and impossible to ignore. Bring your message to life with premium social media and LinkedIn videos."
+    )
+    assert captured_text["master_script.txt"] == result.script
+    assert apply_cpp_calls == []
+    assert captured_json["writer_quality_report.json"]["pre_cpp_word_count"] == len(result.script.split())
+    assert captured_json["writer_quality_report.json"]["post_cpp_word_count"] == len(result.script.split())
+    assert captured_json["writer_quality_report.json"]["clamp_applied"] is False
+
+
 def test_writer_module_resumes_from_valid_cache_when_not_deterministic(tmp_path):
     services, captured_json, captured_text, manifest_box = _capturing_services(
         tmp_path,

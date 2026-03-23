@@ -92,9 +92,20 @@ def run_audio_engineer(
     tts_rate = str(voice_resolution.get("rate", "+0%") or "+0%")
     tts_pitch = str(voice_resolution.get("pitch", "+0Hz") or "+0Hz")
     tts_volume = str(voice_resolution.get("volume", "+0%") or "+0%")
+    voice_engine = str(voice_resolution.get("engine", "edge_tts") or "edge_tts")
+    display_script = services.sanitize_tts_script(node_input.script)
+    pronunciation_payload = services.pronunciation_resolver(display_script, voice_engine, tts_voice)
+    spoken_script = services.sanitize_tts_script(pronunciation_payload.get("spoken_script", display_script))
+    if not spoken_script:
+        spoken_script = display_script
+    matched_rules = pronunciation_payload.get("matched_rules", [])
+    matched_rule_ids = pronunciation_payload.get("matched_rule_ids", [])
+    display_spoken_diff = bool(pronunciation_payload.get("display_spoken_diff", display_script != spoken_script))
+    ruleset_id = str(pronunciation_payload.get("ruleset_id", "") or "")
     script_hash = services.get_hash(
-        f"{services.get_hash(node_input.script)}|{style_profile.get('cache_key', narration_style)}|"
-        f"{requested_voice_preset}|{tts_voice}|{tts_rate}|{tts_pitch}|{tts_volume}"
+        f"{services.get_hash(display_script)}|{services.get_hash(spoken_script)}|{ruleset_id}|"
+        f"{style_profile.get('cache_key', narration_style)}|{requested_voice_preset}|"
+        f"{tts_voice}|{tts_rate}|{tts_pitch}|{tts_volume}"
     )
 
     manifest = services.manifest.load() or {}
@@ -118,7 +129,7 @@ def run_audio_engineer(
         "voice_fallback_used": bool(voice_resolution.get("fallback_used", False)),
         "voice_fallback_reason": str(voice_resolution.get("fallback_reason", "") or ""),
         "voice_provider": str(voice_resolution.get("provider", "edge")),
-        "voice_engine": str(voice_resolution.get("engine", "edge_tts")),
+        "voice_engine": voice_engine,
         "voice": tts_voice,
         "voice_identity": str(voice_resolution.get("voice_identity", tts_voice) or tts_voice),
         "voice_style_base": dict(voice_resolution.get("style_base", {}) or {}),
@@ -129,10 +140,29 @@ def run_audio_engineer(
         "estimated_duration_seconds": duration_meta.get("estimated_duration_seconds"),
         "effective_planning_duration_seconds": duration_meta.get("effective_planning_duration_seconds"),
         "actual_audio_duration_seconds": duration_meta.get("actual_audio_duration_seconds"),
+        "pronunciation_resolver_used": bool(matched_rules),
+        "pronunciation_rule_count": len(matched_rules),
+        "display_spoken_diff": display_spoken_diff,
         "stages": [],
         "mapping_source": "",
         "status": "pending",
     }
+
+    services.write_text_artifact("spoken_script.txt", spoken_script, mirror_legacy=None)
+    services.artifacts.write_json(
+        "pronunciation_report.json",
+        {
+            "ruleset_id": ruleset_id,
+            "display_script": display_script,
+            "spoken_script": spoken_script,
+            "matched_rules": matched_rules,
+            "matched_rule_ids": matched_rule_ids,
+            "backend": pronunciation_payload.get("backend", voice_engine),
+            "voice": pronunciation_payload.get("voice", tts_voice),
+            "display_spoken_diff": display_spoken_diff,
+        },
+        mirror_legacy=None,
+    )
 
     if (
         not deterministic_user_context_mode
@@ -172,8 +202,7 @@ def run_audio_engineer(
         except Exception as exc:
             _add_stage(services, stage_report, "resume", {"used": True, "status": "cache_invalid", "error": str(exc)[:220]})
 
-    ingress_script = services.sanitize_tts_script(node_input.script)
-    if not ingress_script:
+    if not display_script:
         stage_report["status"] = "failed"
         _add_stage(services, stage_report, "ingress", {"status": "failed", "error": "empty_script"})
         services.update_scene_audio_prompt_report(
@@ -193,14 +222,26 @@ def run_audio_engineer(
             errors=["Voice Forge Failed: empty_script"],
         )
 
-    _add_stage(services, stage_report, "ingress", {"status": "ok", "word_count": len(ingress_script.split())})
+    _add_stage(services, stage_report, "ingress", {"status": "ok", "word_count": len(display_script.split())})
+    _add_stage(
+        services,
+        stage_report,
+        "pronunciation_resolver",
+        {
+            "status": "used" if matched_rules else "noop",
+            "rule_count": len(matched_rules),
+            "matched_rule_ids": matched_rule_ids,
+            "display_spoken_diff": display_spoken_diff,
+            "spoken_word_count": len(spoken_script.split()),
+        },
+    )
 
     cpp_system_instruction = (
         "You are a SOTA prosody engineer for AI Speech. Your ONLY job is to optimize this script for natural human-like pacing by removing or replacing breath-breaking commas. "
         f"STYLE GOAL: {style_profile.get('audio_cpp_goal', '')} "
         "Do NOT add content. Preserve wording and meaning. Output ONLY cleaned narration text."
     )
-    tts_script = ingress_script
+    tts_script = spoken_script
     cpp_source = "ingress"
     if deterministic_user_context_mode:
         _add_stage(
@@ -218,7 +259,7 @@ def run_audio_engineer(
             cpp_response = services.smart_retry(
                 services.fireworks_chat_completion,
                 "fireworks_llm",
-                contents=ingress_script,
+                contents=spoken_script,
                 config=services.generate_content_config(
                     system_instruction=cpp_system_instruction,
                     temperature=0.05,
@@ -227,9 +268,9 @@ def run_audio_engineer(
                 trace_node="Audio",
             )
             neural_text = services.sanitize_tts_script(str(cpp_response.text or "").strip())
-            base_word_count = len(ingress_script.split())
+            base_word_count = len(spoken_script.split())
             neural_word_count = len(neural_text.split())
-            alignment = services.summarize_cpp_alignment(ingress_script, neural_text)
+            alignment = services.summarize_cpp_alignment(spoken_script, neural_text)
             overlap = float(alignment["base_token_recall"])
             if neural_text and base_word_count > 0 and neural_word_count > 0 and neural_word_count <= int(base_word_count * 1.35) and overlap >= 0.60:
                 tts_script = neural_text
@@ -258,7 +299,7 @@ def run_audio_engineer(
             _add_stage(services, stage_report, "neural_cpp", {"status": "failed", "error": str(exc)[:220]})
 
     if cpp_source != "neural_cpp":
-        tts_script = services.sanitize_tts_script(services.apply_cpp(ingress_script))
+        tts_script = services.sanitize_tts_script(services.apply_cpp(spoken_script))
         cpp_source = "local_cpp_primary" if deterministic_user_context_mode else "local_cpp_fallback"
         _add_stage(
             services,

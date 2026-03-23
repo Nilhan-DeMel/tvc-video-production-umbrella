@@ -115,6 +115,7 @@ from tvc_nodes.contracts import (
 )
 from tvc_nodes.duration_gate import run_duration_gate
 from tvc_nodes.lead_editor import run_lead_editor
+from tvc_nodes.pronunciation import resolve_pronunciation
 from tvc_nodes.prompt_architect import run_prompt_architect
 from tvc_nodes.scene_director import run_scene_director
 from tvc_nodes.sota_forge import run_sota_forge
@@ -3005,6 +3006,7 @@ def _build_audio_engineer_services() -> AudioEngineerServices:
         write_binary_artifact=_write_binary_artifact,
         json_repair=sota_json_repair,
         get_hash=get_hash,
+        pronunciation_resolver=resolve_pronunciation,
         narration_style_default=NARRATION_STYLE_DEFAULT,
         voice_preset_default=DEFAULT_VOICE_PRESET_ID,
     )

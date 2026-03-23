@@ -60,6 +60,7 @@ def _capturing_services(tmp_path, smart_retry, *, synth_failure=None):
     captured = {}
     reports = []
     manifest_box = {}
+    communicate_inputs = []
 
     def fake_hash(text):
         return f"hash::{text}"
@@ -87,6 +88,7 @@ def _capturing_services(tmp_path, smart_retry, *, synth_failure=None):
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
+            communicate_inputs.append({"args": args, "kwargs": kwargs})
 
         async def stream(self):
             if synth_failure:
@@ -170,14 +172,23 @@ def _capturing_services(tmp_path, smart_retry, *, synth_failure=None):
         write_binary_artifact=write_binary,
         json_repair=lambda text: json.loads(text),
         get_hash=fake_hash,
+        pronunciation_resolver=lambda text, backend, voice: {
+            "display_script": str(text or "").strip(),
+            "spoken_script": str(text or "").strip(),
+            "matched_rules": [],
+            "matched_rule_ids": [],
+            "backend": backend,
+            "voice": voice,
+            "display_spoken_diff": False,
+        },
         narration_style_default="sales_saas",
         voice_preset_default="style_default",
     )
-    return services, captured, reports, manifest_box, fake_hash
+    return services, captured, reports, manifest_box, fake_hash, communicate_inputs
 
 
 def test_audio_engineer_module_bypasses_fireworks_in_deterministic_mode(tmp_path):
-    services, captured, reports, manifest_box, _ = _capturing_services(
+    services, captured, reports, manifest_box, _, _ = _capturing_services(
         tmp_path,
         smart_retry=lambda *args, **kwargs: pytest.fail("smart_retry should not run"),
     )
@@ -219,7 +230,7 @@ def test_audio_engineer_module_uses_primary_api_path_when_not_deterministic(tmp_
             }]))
         raise AssertionError(f"unexpected prompt template: {prompt_id}")
 
-    services, captured, reports, _, _ = _capturing_services(tmp_path, smart_retry=fake_retry)
+    services, captured, reports, _, _, _ = _capturing_services(tmp_path, smart_retry=fake_retry)
     result = run_audio_engineer(
         _sample_input(input_source="YOUTUBE_HARVEST", context_rewrite="off"),
         services,
@@ -232,7 +243,7 @@ def test_audio_engineer_module_uses_primary_api_path_when_not_deterministic(tmp_
 
 
 def test_audio_engineer_module_resumes_from_cache(tmp_path):
-    services, _, reports, manifest_box, fake_hash = _capturing_services(
+    services, _, reports, manifest_box, fake_hash, _ = _capturing_services(
         tmp_path,
         smart_retry=lambda *args, **kwargs: pytest.fail("smart_retry should not run"),
     )
@@ -242,7 +253,7 @@ def test_audio_engineer_module_resumes_from_cache(tmp_path):
     pitch = "+0Hz"
     volume = "+0%"
     manifest_box["audio_script_hash"] = fake_hash(
-        f"{fake_hash(node_input.script)}|sales_saas|style_default|{voice}|{rate}|{pitch}|{volume}"
+        f"{fake_hash(node_input.script)}|{fake_hash(node_input.script)}||sales_saas|style_default|{voice}|{rate}|{pitch}|{volume}"
     )
     (tmp_path / "master_narration.mp3").write_bytes(b"ID3")
     (tmp_path / "narration.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
@@ -269,7 +280,7 @@ def test_audio_engineer_module_resumes_from_cache(tmp_path):
 
 
 def test_audio_engineer_module_returns_failed_status_on_synthesis_failure(tmp_path):
-    services, captured, reports, _, _ = _capturing_services(
+    services, captured, reports, _, _, _ = _capturing_services(
         tmp_path,
         smart_retry=lambda *args, **kwargs: pytest.fail("smart_retry should not run"),
         synth_failure="tts exploded",
@@ -281,6 +292,53 @@ def test_audio_engineer_module_returns_failed_status_on_synthesis_failure(tmp_pa
     assert result.errors == ["Voice Forge Failed: tts exploded"]
     assert captured["audio_stage_report.json"]["status"] == "failed"
     assert reports[-1][1]["failure"] == "Voice Forge Failed: tts exploded"
+
+
+def test_audio_engineer_uses_spoken_alias_and_writes_pronunciation_artifacts(tmp_path):
+    services, captured, _, _, _, communicate_inputs = _capturing_services(
+        tmp_path,
+        smart_retry=lambda *args, **kwargs: pytest.fail("smart_retry should not run"),
+    )
+    services = services.__class__(
+        **{
+            **services.__dict__,
+            "pronunciation_resolver": lambda text, backend, voice: {
+                "display_script": str(text or "").strip(),
+                "spoken_script": "I create AI-powered videos with refinement, rhythm, and visual clarity.",
+                "matched_rules": [
+                    {
+                        "id": "phrase.polish_rhythm_visual_clarity",
+                        "scope": "phrase",
+                        "match": "with polish, rhythm, and visual clarity",
+                    }
+                ],
+                "matched_rule_ids": ["phrase.polish_rhythm_visual_clarity"],
+                "backend": backend,
+                "voice": voice,
+                "display_spoken_diff": True,
+            },
+        }
+    )
+
+    result = run_audio_engineer(
+        _sample_input(
+            script="I create AI-powered videos with polish, rhythm, and visual clarity.",
+            context_summary="I create AI-powered videos with polish, rhythm, and visual clarity.",
+            request_prompt="I create AI-powered videos with polish, rhythm, and visual clarity.",
+            visual_scenes=[{"id": 1, "text": "I create AI-powered videos with polish, rhythm, and visual clarity.", "visual_intent": "Polished office", "subjects": []}],
+        ),
+        services,
+    )
+
+    assert result.status == "audio_forged"
+    assert communicate_inputs[-1]["args"][0] == "I create AI-powered videos with refinement, rhythm, and visual clarity."
+    assert (tmp_path / "spoken_script.txt").read_text(encoding="utf-8") == communicate_inputs[-1]["args"][0]
+    report = json.loads((tmp_path / "pronunciation_report.json").read_text(encoding="utf-8"))
+    assert report["matched_rule_ids"] == ["phrase.polish_rhythm_visual_clarity"]
+    assert report["display_spoken_diff"] is True
+    assert captured["audio_stage_report.json"]["pronunciation_resolver_used"] is True
+    assert captured["audio_stage_report.json"]["pronunciation_rule_count"] == 1
+    assert captured["audio_stage_report.json"]["display_spoken_diff"] is True
 
 
 def test_audio_engineer_core_wrapper_delegates_to_node_module(monkeypatch):
