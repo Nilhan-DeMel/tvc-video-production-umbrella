@@ -1,5 +1,10 @@
 # TVC Umbrella Repo
 
+TVC Studio Agent is a local-first, multi-stage AI media-production system with explicit writing, timing, audio, visual, editing, and verification stages.
+
+> [!TIP]
+> **Evaluating this project?** Start with the [Engineering Overview](ENGINEERING_OVERVIEW.md) for the architecture, guided code tour, verification model, agent entry points, and current boundaries.
+
 This repo has exactly two product folders:
 
 - `Video_production_agent/` - the canonical live TVC app
