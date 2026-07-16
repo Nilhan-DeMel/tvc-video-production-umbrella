@@ -543,8 +543,10 @@ def test_narrate_responsive_layout_stacks_when_narrow(monkeypatch):
 @pytest.mark.parametrize("theme_id", ["obsidian_contrast", "aurora_graphite"])
 @pytest.mark.parametrize("density", ["cozy", "compact"])
 @pytest.mark.parametrize("size", [(1366, 768), (1600, 900), (1920, 1080), (2560, 1440)])
-def test_narrate_overlap_guard_in_stress_layout(monkeypatch, theme_id, density, size):
+def test_narrate_overlap_guard_in_stress_layout(monkeypatch, tmp_path, theme_id, density, size):
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    output_video = tmp_path / "emperor_output_1773485653.mp4"
+    output_video.touch()
     monkeypatch.setattr("ui.main_window.list_run_cards", lambda limit=60: [])
     monkeypatch.setattr("ui.main_window.list_run_ids", lambda: ["verify_nondet_scene_1773229530"])
     monkeypatch.setattr("ui.main_window.list_completed_runs", lambda *args, **kwargs: [])
@@ -557,7 +559,7 @@ def test_narrate_overlap_guard_in_stress_layout(monkeypatch, theme_id, density, 
             "retries": 0,
             "eta": "--",
             "api_failures": 0,
-            "output_video": r"D:\AI-Apps-In-Drive\App_Station\Video_production_agent\emperor_output_1773485653.mp4",
+            "output_video": str(output_video),
             "progress_pct": 100.0,
             "node_detail": "Verifier clean and latest output ready",
             "node_units_completed": None,
