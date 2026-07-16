@@ -1,0 +1,10 @@
+# Test-only dependency surface for the canonical desktop application.
+pytest>=8,<9
+PyQt6>=6.7,<7
+langgraph>=1,<2
+edge-tts>=7,<8
+google-genai>=1,<2
+Pillow>=10,<13
+requests>=2.32,<3
+smartcrop>=0.3,<1
+yt-dlp>=2025.1

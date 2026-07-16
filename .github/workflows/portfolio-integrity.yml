@@ -1,0 +1,39 @@
+name: Portfolio Integrity
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  documentation-and-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify portfolio documentation
+        shell: bash
+        run: |
+          test -s README.md
+          test -s SECURITY.md
+          test -s CONTRIBUTING.md
+          test -s RIGHTS.md
+          test -s docs/social-preview.png
+          python - <<'PY'
+          import struct
+          from pathlib import Path
+          image = Path('docs/social-preview.png').read_bytes()
+          assert image[:8] == b'\x89PNG\r\n\x1a\n'
+          width, height = struct.unpack('>II', image[16:24])
+          assert (width, height) == (1280, 640), (width, height)
+          PY
+      - name: Scan changed history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

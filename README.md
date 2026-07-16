@@ -1,5 +1,10 @@
 # TVC Umbrella Repo
 
+<!-- portfolio-flagship -->
+<p align="center"><img src="docs/social-preview.png" alt="TVC Video Production social preview" width="100%"></p>
+
+> **Portfolio review path:** Start with the capabilities and architecture below, then reproduce the documented verification commands. See [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [RIGHTS.md](RIGHTS.md) for the project's operating and reuse boundaries.
+
 TVC Studio Agent is a local-first, multi-stage AI media-production system with explicit writing, timing, audio, visual, editing, and verification stages.
 
 > [!TIP]

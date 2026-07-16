@@ -1,0 +1,4 @@
+# Deliberate fake credential shapes used by the API-key audit regression suite.
+da9258d339ee1737102f11590aed851199373de8:tests/test_api_key_audit.py:generic-api-key:134
+da9258d339ee1737102f11590aed851199373de8:tests/test_api_key_audit.py:generic-api-key:139
+da9258d339ee1737102f11590aed851199373de8:tests/test_api_key_audit.py:generic-api-key:153
